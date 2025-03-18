@@ -1,5 +1,6 @@
 https://artifacthub.io/packages/helm/superset/superset
 
+https://chatgpt.com/c/67d8ed48-65cc-8005-8a43-a311153dd633
 
 ### **Deploying Apache Superset on AKS Without Helm**
 If you are **not using Helm**, you need to manually define **Kubernetes YAML manifests** for **each component**:

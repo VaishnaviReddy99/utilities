@@ -1,0 +1,302 @@
+### **Deploying Apache Superset on AKS Without Helm**
+If you are **not using Helm**, you need to manually define **Kubernetes YAML manifests** for **each component**:
+
+1. **PostgreSQL Database** (Superset metadata storage)
+2. **Redis** (For async jobs)
+3. **Superset Web Application**
+4. **Superset Worker** (Celery for background tasks)
+5. **Superset Service** (To expose the app)
+6. **Ingress Controller** (Optional for external access)
+
+---
+
+## **1️⃣ PostgreSQL Deployment**
+Since Superset requires a database, we first deploy **PostgreSQL**.
+
+### **📌 `postgres-deployment.yaml`**
+```yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-pvc
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:14
+          env:
+            - name: POSTGRES_USER
+              value: "superset"
+            - name: POSTGRES_PASSWORD
+              value: "supersetpassword"
+            - name: POSTGRES_DB
+              value: "superset"
+          ports:
+            - containerPort: 5432
+          volumeMounts:
+            - mountPath: /var/lib/postgresql/data
+              name: postgres-storage
+      volumes:
+        - name: postgres-storage
+          persistentVolumeClaim:
+            claimName: postgres-pvc
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+spec:
+  selector:
+    app: postgres
+  ports:
+    - protocol: TCP
+      port: 5432
+      targetPort: 5432
+```
+🔹 **Creates a PostgreSQL DB with persistent storage**.
+
+Apply it:
+```sh
+kubectl apply -f postgres-deployment.yaml
+```
+
+---
+
+## **2️⃣ Redis Deployment**
+Superset uses **Redis** for asynchronous jobs.
+
+### **📌 `redis-deployment.yaml`**
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      containers:
+        - name: redis
+          image: redis:latest
+          ports:
+            - containerPort: 6379
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+spec:
+  selector:
+    app: redis
+  ports:
+    - protocol: TCP
+      port: 6379
+      targetPort: 6379
+```
+🔹 **Deploys Redis as an in-memory cache**.
+
+Apply it:
+```sh
+kubectl apply -f redis-deployment.yaml
+```
+
+---
+
+## **3️⃣ Superset Web Application**
+The main Superset **web UI & API server**.
+
+### **📌 `superset-deployment.yaml`**
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: superset
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: superset
+  template:
+    metadata:
+      labels:
+        app: superset
+    spec:
+      containers:
+        - name: superset
+          image: apache/superset:latest
+          ports:
+            - containerPort: 8088
+          env:
+            - name: SUPERSET_SECRET_KEY
+              value: "mysecretkey"
+            - name: SUPERSET_DATABASE_URI
+              value: "postgresql://superset:supersetpassword@postgres:5432/superset"
+            - name: REDIS_HOST
+              value: "redis"
+```
+🔹 **Runs Superset UI/API with PostgreSQL & Redis configuration**.
+
+Apply it:
+```sh
+kubectl apply -f superset-deployment.yaml
+```
+
+---
+
+## **4️⃣ Superset Worker (Celery)**
+Superset **async jobs** (e.g., query execution) require a **Celery worker**.
+
+### **📌 `superset-worker.yaml`**
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: superset-worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: superset-worker
+  template:
+    metadata:
+      labels:
+        app: superset-worker
+    spec:
+      containers:
+        - name: superset-worker
+          image: apache/superset:latest
+          command: ["celery", "worker", "--app=superset.tasks.celery_app:app"]
+          env:
+            - name: SUPERSET_DATABASE_URI
+              value: "postgresql://superset:supersetpassword@postgres:5432/superset"
+            - name: REDIS_HOST
+              value: "redis"
+```
+🔹 **Runs Superset background tasks with Celery**.
+
+Apply it:
+```sh
+kubectl apply -f superset-worker.yaml
+```
+
+---
+
+## **5️⃣ Superset Service (Exposing the App)**
+Expose Superset **internally or externally**.
+
+### **📌 `superset-service.yaml`**
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: superset
+spec:
+  selector:
+    app: superset
+  type: LoadBalancer
+  ports:
+    - protocol: TCP
+      port: 8088
+      targetPort: 8088
+```
+🔹 **Creates a LoadBalancer to expose Superset**.
+
+Apply it:
+```sh
+kubectl apply -f superset-service.yaml
+```
+---
+## **6️⃣ (Optional) Ingress for External Access**
+If you want to use **Ingress** instead of a LoadBalancer:
+
+### **📌 `superset-ingress.yaml`**
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: superset-ingress
+spec:
+  rules:
+    - host: superset.mydomain.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: superset
+                port:
+                  number: 8088
+```
+🔹 **Maps `superset.mydomain.com` to Superset's service**.
+
+Apply it:
+```sh
+kubectl apply -f superset-ingress.yaml
+```
+
+---
+
+## **🎯 Final Steps**
+### **📌 Deploy Everything**
+```sh
+kubectl apply -f postgres-deployment.yaml
+kubectl apply -f redis-deployment.yaml
+kubectl apply -f superset-deployment.yaml
+kubectl apply -f superset-worker.yaml
+kubectl apply -f superset-service.yaml
+kubectl apply -f superset-ingress.yaml  # Optional
+```
+
+### **📌 Check if Everything is Running**
+```sh
+kubectl get pods
+kubectl get svc
+kubectl get ingress
+```
+
+### **📌 Access Superset**
+- **LoadBalancer**: `http://<EXTERNAL-IP>:8088`
+- **Ingress**: `http://superset.mydomain.com`
+
+---
+
+## **🚀 Summary**
+| **Component** | **File** | **What It Does?** |
+|--------------|---------|-------------------|
+| **PostgreSQL** | `postgres-deployment.yaml` | Stores metadata |
+| **Redis** | `redis-deployment.yaml` | Handles caching/jobs |
+| **Superset UI/API** | `superset-deployment.yaml` | Runs the web interface |
+| **Superset Worker** | `superset-worker.yaml` | Handles async tasks |
+| **Superset Service** | `superset-service.yaml` | Exposes Superset |
+| **Ingress (Optional)** | `superset-ingress.yaml` | Routes external traffic |
+
+🚀 **Now Superset is fully deployed on AKS WITHOUT Helm!** Let me know if you need modifications! 🚀
